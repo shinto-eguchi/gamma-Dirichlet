@@ -1,3 +1,4 @@
+````markdown
 # Gamma-Dirichlet graph experiments for robust manifold learning
 
 This repository contains the reproducibility code for the numerical experiments in
@@ -17,22 +18,21 @@ All code comments are written in English.
 
 ```text
 .
-├── notebooks/
-│   ├── half_moons_section51.ipynb
-│   └── swiss_roll_section52.ipynb
-├── scripts/
-│   ├── half_moons_section51.py
-│   └── swiss_roll_section52.py
-├── tex/
-│   └── figure_snippets.tex
-├── gdc_figures/        # generated figures; ignored except .gitkeep
-├── results/            # optional generated outputs; ignored except .gitkeep
+├── half_moons_section51.ipynb
+├── half_moons_section51.py
+├── swiss_roll_section52.ipynb
+├── swiss_roll_section52.py
+├── figure_snippets.tex
 ├── requirements.txt
 ├── environment.yml
 ├── CITATION.cff
 ├── LICENSE
+├── .gitignore
 └── README.md
-```
+````
+
+Generated figures and tables are saved under `gdc_figures/` and `results/`
+when the scripts are executed.
 
 ## Installation
 
@@ -54,33 +54,35 @@ conda activate gamma-dirichlet-manifold-experiments
 ## Running the notebooks
 
 ```bash
-jupyter notebook notebooks/half_moons_section51.ipynb
-jupyter notebook notebooks/swiss_roll_section52.ipynb
+jupyter notebook half_moons_section51.ipynb
+jupyter notebook swiss_roll_section52.ipynb
 ```
 
 ## Running the scripts
 
 ```bash
-python scripts/half_moons_section51.py
-python scripts/swiss_roll_section52.py
+python half_moons_section51.py
+python swiss_roll_section52.py
 ```
 
-The scripts save figures and tables under `gdc_figures/` by default.  The
-Swiss-roll experiment uses `N_REP = 8` and `N_JOBS = 7` in the notebook/script;
+The Swiss-roll experiment uses `N_REP = 8` and `N_JOBS = 7` in the notebook/script;
 adjust these constants near the top of the file if needed.
 
 ## Notes
 
-- In the half-moon experiment, scatter clutter is excluded from ARI scoring and
+* In the half-moon experiment, scatter clutter is excluded from ARI scoring and
   only affects the graph construction.
-- In the Swiss-roll experiment, clutter points affect the graph and embedding,
+* In the Swiss-roll experiment, clutter points affect the graph and embedding,
   while the geodesic-preservation score is computed only on the original manifold
   points.
-- The Swiss-roll input figure uses a truncated viridis colormap for the clean
+* The Swiss-roll input figure uses a truncated viridis colormap for the clean
   manifold and magenta points for uniform clutter.
 
 ## Citation
 
-If you use this code, please cite the associated manuscript.  A preliminary
+If you use this code, please cite the associated manuscript. A preliminary
 `CITATION.cff` file is included and can be updated once the final bibliographic
 information is available.
+
+```
+```
