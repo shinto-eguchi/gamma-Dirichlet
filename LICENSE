@@ -1,0 +1,17 @@
+% Figure snippet for Section 5.2
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\textwidth]{gdc_figures/swiss_roll_clean_vs_clutter400_3d_magenta.pdf}
+\caption{
+Swiss roll data with and without off-manifold clutter.
+Left: the clean sample consists of \(800\) points on a two-dimensional swiss roll
+in \(\mathbb R^3\), colored by the roll parameter \(t\).
+Right: \(400\) uniform clutter points, shown in magenta, are added to the
+bounding box of the clean sample.  This contaminated point cloud corresponds to
+the strongest clutter level used in Table~\ref{tab:swiss-roll}.  The comparison
+illustrates the central difficulty of the experiment: the on-manifold geometry
+should be recovered after density removal, while off-manifold clutter should be
+suppressed by the independent dimension gate.
+}
+\label{fig:swiss-roll-clean-vs-clutter400}
+\end{figure}

@@ -1,0 +1,744 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Generated from half_moons_1.ipynb.
+This script reproduces the corresponding numerical experiment in the manuscript.
+"""
+# ============================================================
+# Section 5.1: Half-moons with scatter noise
+# Gamma-Dirichlet clustering versus Coifman--Lafon diffusion maps
+#
+# This script is self-contained and Colab-friendly.
+# It generates the half-moon data, builds one shared Gaussian kNN graph,
+# compares the two endpoint modulations, and saves tables and figures.
+# ============================================================
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from typing import Dict, Tuple, List
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+from scipy.sparse import csr_matrix, diags
+from scipy.sparse.linalg import eigsh
+
+from sklearn.cluster import KMeans
+from sklearn.datasets import make_moons
+from sklearn.metrics import adjusted_rand_score
+from sklearn.neighbors import NearestNeighbors
+
+from joblib import Parallel, delayed
+
+# ============================================================
+# Configuration
+# ============================================================
+
+@dataclass(frozen=True)
+class ExperimentConfig:
+    """Configuration for the half-moon experiment."""
+
+    n_per_moon: int = 150
+    n_rep: int = 12
+    n_jobs: int = 7
+    k_nn: int = 15
+    n_clusters: int = 2
+    random_seed_offset: int = 0
+    output_dir: str = "gdc_figures"
+
+    gamma_grid: Tuple[float, ...] = (0.0, 0.25, 0.5, 1.0, 1.5, 2.0, 2.5)
+    alpha_grid: Tuple[float, ...] = (0.0, 0.25, 0.5, 0.75, 1.0)
+
+    # Clutter is excluded from ARI evaluation and marked by label -1.
+    settings: Dict[str, Dict[str, float]] = None
+
+    def __post_init__(self):
+        if self.settings is None:
+            object.__setattr__(
+                self,
+                "settings",
+                {
+                    "clean": {"noise": 0.00, "n_clutter": 0},
+                    "jitter": {"noise": 0.12, "n_clutter": 0},
+                    "clutter": {"noise": 0.08, "n_clutter": 100},
+                },
+            )
+
+
+EPS = 1.0e-12
+
+# %%
+# ============================================================
+# Data generation
+# ============================================================
+
+def make_half_moons(
+    n_per_moon: int = 150,
+    noise: float = 0.0,
+    n_clutter: int = 0,
+    seed: int = 0,
+    clutter_pad: float = 0.5,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Generate two half-moons with optional uniform scatter clutter.
+
+    Parameters
+    ----------
+    n_per_moon:
+        Number of clean points in each moon.
+    noise:
+        Gaussian jitter used by sklearn.datasets.make_moons.
+    n_clutter:
+        Number of uniform background points.
+    seed:
+        Random seed.
+    clutter_pad:
+        Padding added to the bounding box before drawing clutter.
+
+    Returns
+    -------
+    X:
+        Array of shape (n, 2).
+    y:
+        Labels. Clean moon labels are 0 and 1; clutter points have label -1.
+    """
+
+    rng = np.random.default_rng(seed)
+
+    X, y = make_moons(
+        n_samples=2 * n_per_moon,
+        noise=noise,
+        random_state=int(rng.integers(1 << 31)),
+    )
+
+    if n_clutter > 0:
+        lower = X.min(axis=0) - clutter_pad
+        upper = X.max(axis=0) + clutter_pad
+        clutter = rng.uniform(lower, upper, size=(int(n_clutter), 2))
+
+        X = np.vstack([X, clutter])
+        y = np.concatenate([y, np.full(int(n_clutter), -1, dtype=int)])
+
+    return X, y
+
+# ============================================================
+# Shared Gaussian kNN graph
+# ============================================================
+
+def gaussian_knn_kernel(
+    X: np.ndarray,
+    k: int = 15,
+    bandwidth: float | None = None,
+) -> Tuple[csr_matrix, float]:
+    """Build a symmetric fixed-bandwidth Gaussian kNN kernel.
+
+    A single global bandwidth is used so that density variation remains in
+    the kernel degree.  This is important because both endpoint modulations
+    act on degree-based node weights.
+    """
+
+    n = X.shape[0]
+    nn = NearestNeighbors(n_neighbors=k + 1).fit(X)
+    distances, indices = nn.kneighbors(X)
+
+    if bandwidth is None:
+        bandwidth = float(np.median(distances[:, 1:]))
+
+    rows = np.repeat(np.arange(n), k)
+    cols = indices[:, 1:].ravel()
+    weights = np.exp(-(distances[:, 1:].ravel() ** 2) / (2.0 * bandwidth ** 2))
+
+    K = csr_matrix((weights, (rows, cols)), shape=(n, n))
+    K = K.maximum(K.T)
+
+    return K, bandwidth
+
+# ============================================================
+# Spectral utilities
+# ============================================================
+
+def normalized_spectral_clustering(
+    affinity: csr_matrix,
+    n_clusters: int = 2,
+    seed: int = 0,
+) -> Tuple[np.ndarray, np.ndarray, float]:
+    """Run normalized spectral clustering from a symmetric affinity matrix.
+
+    The eigenvectors are those of D^{-1/2} A D^{-1/2}.  The first
+    n_clusters eigenvectors are row-normalized before k-means, following the
+    Ng--Jordan--Weiss construction.
+    """
+
+    degrees = np.asarray(affinity.sum(axis=1)).ravel()
+    D_inv_sqrt = diags(1.0 / np.sqrt(degrees + EPS))
+
+    S = D_inv_sqrt @ affinity @ D_inv_sqrt
+    S = 0.5 * (S + S.T)
+
+    n_eigs = min(n_clusters + 1, affinity.shape[0] - 1)
+    vals, vecs = eigsh(S, k=n_eigs, which="LA")
+
+    order = np.argsort(vals)[::-1]
+    vals = vals[order]
+    vecs = vecs[:, order]
+
+    laplacian_eigenvalues = 1.0 - vals
+
+    U = vecs[:, :n_clusters]
+    U = U / (np.linalg.norm(U, axis=1, keepdims=True) + EPS)
+
+    labels = KMeans(
+        n_clusters=n_clusters,
+        n_init=20,
+        random_state=seed,
+    ).fit_predict(U)
+
+    if len(laplacian_eigenvalues) > n_clusters:
+        eigengap = float(
+            laplacian_eigenvalues[n_clusters]
+            - laplacian_eigenvalues[n_clusters - 1]
+        )
+    else:
+        eigengap = np.nan
+
+    return labels, laplacian_eigenvalues, eigengap
+
+
+def adjusted_rand_nonclutter(y_true: np.ndarray, labels: np.ndarray) -> float:
+    """Compute ARI after removing uniform clutter points from the score."""
+
+    mask = y_true >= 0
+    return float(adjusted_rand_score(y_true[mask], labels[mask]))
+
+# %%
+# ============================================================
+# Gamma-Dirichlet and diffusion-map clustering
+# ============================================================
+
+def gamma_dirichlet_clustering(
+    K: csr_matrix,
+    gamma: float,
+    n_clusters: int = 2,
+    seed: int = 0,
+) -> Tuple[np.ndarray, np.ndarray, float]:
+    """Gamma-Dirichlet clustering on the escort-conductance graph.
+
+    The node mass is the normalized kernel degree q_i.  The conductance is
+
+        c_ij = (q_i q_j)^gamma K_ij.
+
+    Positive gamma suppresses low-degree scatter clutter by reducing its
+    endpoint conductance before the Laplacian is formed.
+    """
+
+    degree = np.asarray(K.sum(axis=1)).ravel()
+    q = (degree + EPS) / np.sum(degree + EPS)
+
+    Q_gamma = diags(q ** gamma)
+    C_gamma = Q_gamma @ K @ Q_gamma
+
+    return normalized_spectral_clustering(
+        C_gamma,
+        n_clusters=n_clusters,
+        seed=seed,
+    )
+
+
+def diffusion_map_clustering(
+    K: csr_matrix,
+    alpha: float,
+    n_clusters: int = 2,
+    diffusion_time: float = 1.0,
+    seed: int = 0,
+) -> Tuple[np.ndarray, np.ndarray, float]:
+    """Coifman--Lafon diffusion-map clustering.
+
+    The same base kernel K is used.  The alpha-normalized kernel is
+
+        K_alpha = D_p^{-alpha} K D_p^{-alpha},
+
+    where p_i is the kernel degree.  Alpha removes sampling density rather
+    than using it as a gate.
+    """
+
+    p = np.asarray(K.sum(axis=1)).ravel() + EPS
+    P_alpha = diags(p ** (-alpha))
+    K_alpha = P_alpha @ K @ P_alpha
+
+    d_alpha = np.asarray(K_alpha.sum(axis=1)).ravel()
+    D_inv_sqrt = diags(1.0 / np.sqrt(d_alpha + EPS))
+
+    S = D_inv_sqrt @ K_alpha @ D_inv_sqrt
+    S = 0.5 * (S + S.T)
+
+    n_eigs = min(n_clusters + 1, K.shape[0] - 1)
+    vals, vecs = eigsh(S, k=n_eigs, which="LA")
+
+    order = np.argsort(vals)[::-1]
+    vals = vals[order]
+    vecs = vecs[:, order]
+
+    laplacian_eigenvalues = 1.0 - vals
+
+    # Right eigenvectors of the row-stochastic diffusion operator.
+    psi = D_inv_sqrt @ vecs
+
+    # Drop the trivial coordinate and use the leading nontrivial diffusion coordinates.
+    coords = psi[:, 1:n_clusters] * (np.abs(vals[1:n_clusters]) ** diffusion_time)
+
+    labels = KMeans(
+        n_clusters=n_clusters,
+        n_init=20,
+        random_state=seed,
+    ).fit_predict(coords)
+
+    if len(laplacian_eigenvalues) > n_clusters:
+        eigengap = float(
+            laplacian_eigenvalues[n_clusters]
+            - laplacian_eigenvalues[n_clusters - 1]
+        )
+    else:
+        eigengap = np.nan
+
+    return labels, laplacian_eigenvalues, eigengap
+
+# ============================================================
+# Replicates and summaries
+# ============================================================
+
+def run_one_replicate(
+    seed: int,
+    setting: Dict[str, float],
+    config: ExperimentConfig,
+) -> Dict[str, np.ndarray]:
+    """Run one replicate for all gamma and alpha values."""
+
+    X, y = make_half_moons(
+        n_per_moon=config.n_per_moon,
+        noise=float(setting["noise"]),
+        n_clutter=int(setting["n_clutter"]),
+        seed=seed + config.random_seed_offset,
+    )
+
+    K, _ = gaussian_knn_kernel(X, k=config.k_nn)
+
+    gamma_ari = []
+    gamma_gap = []
+    for gamma in config.gamma_grid:
+        labels, _, gap = gamma_dirichlet_clustering(
+            K,
+            gamma=gamma,
+            n_clusters=config.n_clusters,
+            seed=seed,
+        )
+        gamma_ari.append(adjusted_rand_nonclutter(y, labels))
+        gamma_gap.append(gap)
+
+    dm_ari = []
+    dm_gap = []
+    for alpha in config.alpha_grid:
+        labels, _, gap = diffusion_map_clustering(
+            K,
+            alpha=alpha,
+            n_clusters=config.n_clusters,
+            seed=seed,
+        )
+        dm_ari.append(adjusted_rand_nonclutter(y, labels))
+        dm_gap.append(gap)
+
+    return {
+        "gamma_ari": np.asarray(gamma_ari),
+        "gamma_gap": np.asarray(gamma_gap),
+        "dm_ari": np.asarray(dm_ari),
+        "dm_gap": np.asarray(dm_gap),
+    }
+
+
+def summarize_grid(values: np.ndarray, grid: Tuple[float, ...]) -> pd.DataFrame:
+    """Summarize a replicate-by-parameter array."""
+
+    return pd.DataFrame(
+        {
+            "parameter": list(grid),
+            "mean": values.mean(axis=0),
+            "sd": values.std(axis=0),
+        }
+    )
+
+
+def run_experiment(config: ExperimentConfig) -> pd.DataFrame:
+    """Run all settings and return a long-format summary table."""
+
+    all_rows = []
+
+    for setting_name, setting in config.settings.items():
+        print(f"Running setting: {setting_name}")
+
+        outputs = Parallel(n_jobs=config.n_jobs)(
+            delayed(run_one_replicate)(seed, setting, config)
+            for seed in range(config.n_rep)
+        )
+
+        gamma_ari = np.vstack([out["gamma_ari"] for out in outputs])
+        gamma_gap = np.vstack([out["gamma_gap"] for out in outputs])
+        dm_ari = np.vstack([out["dm_ari"] for out in outputs])
+        dm_gap = np.vstack([out["dm_gap"] for out in outputs])
+
+        for j, gamma in enumerate(config.gamma_grid):
+            all_rows.append(
+                {
+                    "setting": setting_name,
+                    "method": "Gamma-Dirichlet",
+                    "parameter_name": "gamma",
+                    "parameter": gamma,
+                    "mean_ari": gamma_ari[:, j].mean(),
+                    "sd_ari": gamma_ari[:, j].std(),
+                    "mean_eigengap": gamma_gap[:, j].mean(),
+                    "sd_eigengap": gamma_gap[:, j].std(),
+                }
+            )
+
+        for j, alpha in enumerate(config.alpha_grid):
+            all_rows.append(
+                {
+                    "setting": setting_name,
+                    "method": "Diffusion map",
+                    "parameter_name": "alpha",
+                    "parameter": alpha,
+                    "mean_ari": dm_ari[:, j].mean(),
+                    "sd_ari": dm_ari[:, j].std(),
+                    "mean_eigengap": dm_gap[:, j].mean(),
+                    "sd_eigengap": dm_gap[:, j].std(),
+                }
+            )
+
+    summary = pd.DataFrame(all_rows)
+    return summary
+
+
+def format_mean_sd(mean: float, sd: float, digits: int = 3) -> str:
+    """Format a mean and standard deviation as mean (sd)."""
+
+    return f"{mean:.{digits}f} ({sd:.{digits}f})"
+
+
+def wide_table(
+    summary: pd.DataFrame,
+    method: str,
+    parameter_name: str,
+    digits: int = 3,
+) -> pd.DataFrame:
+    """Create a manuscript-style wide table."""
+
+    sub = summary[summary["method"] == method].copy()
+    sub["entry"] = [
+        format_mean_sd(m, s, digits=digits)
+        for m, s in zip(sub["mean_ari"], sub["sd_ari"])
+    ]
+
+    table = sub.pivot(
+        index="setting",
+        columns="parameter",
+        values="entry",
+    )
+
+    table.columns = [f"{parameter_name}={v:g}" for v in table.columns]
+    return table.reset_index()
+
+
+def save_summary_tables(summary: pd.DataFrame, config: ExperimentConfig) -> None:
+    """Save CSV and LaTeX summaries."""
+
+    os.makedirs(config.output_dir, exist_ok=True)
+
+    summary_path = os.path.join(config.output_dir, "half_moons_summary_long.csv")
+    summary.to_csv(summary_path, index=False)
+
+    gamma_table = wide_table(summary, "Gamma-Dirichlet", "gamma")
+    dm_table = wide_table(summary, "Diffusion map", "alpha")
+
+    gamma_csv = os.path.join(config.output_dir, "half_moons_gamma_table.csv")
+    dm_csv = os.path.join(config.output_dir, "half_moons_diffusion_map_table.csv")
+
+    gamma_tex = os.path.join(config.output_dir, "half_moons_gamma_table.tex")
+    dm_tex = os.path.join(config.output_dir, "half_moons_diffusion_map_table.tex")
+
+    gamma_table.to_csv(gamma_csv, index=False)
+    dm_table.to_csv(dm_csv, index=False)
+
+    gamma_table.to_latex(gamma_tex, index=False, escape=False)
+    dm_table.to_latex(dm_tex, index=False, escape=False)
+
+    print(f"Saved {summary_path}")
+    print(f"Saved {gamma_csv}")
+    print(f"Saved {dm_csv}")
+    print(f"Saved {gamma_tex}")
+    print(f"Saved {dm_tex}")
+
+# %%
+# ============================================================
+# Figures
+# ============================================================
+
+def scatter_true_labels(
+    ax,
+    X: np.ndarray,
+    y: np.ndarray,
+    title: str,
+    clutter_color: str = "magenta",
+) -> None:
+    """Plot true moon labels and mark clutter separately."""
+
+    mask0 = y == 0
+    mask1 = y == 1
+    maskc = y < 0
+
+    ax.scatter(X[mask0, 0], X[mask0, 1], s=16, c="C0", label="moon 0")
+    ax.scatter(X[mask1, 0], X[mask1, 1], s=16, c="C1", label="moon 1")
+
+    if np.any(maskc):
+        ax.scatter(
+            X[maskc, 0],
+            X[maskc, 1],
+            s=20,
+            c=clutter_color,
+            marker="x",
+            alpha=0.75,
+            label="clutter",
+        )
+
+    ax.set_title(title)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_aspect("equal", adjustable="box")
+
+
+def scatter_cluster_labels(
+    ax,
+    X: np.ndarray,
+    y: np.ndarray,
+    labels: np.ndarray,
+    title: str,
+    clutter_color: str = "magenta",
+) -> None:
+    """Plot predicted labels on clean points and show clutter separately."""
+
+    clean = y >= 0
+    clutter = y < 0
+
+    ax.scatter(
+        X[clean, 0],
+        X[clean, 1],
+        c=labels[clean],
+        cmap="coolwarm",
+        s=16,
+        linewidths=0,
+    )
+
+    if np.any(clutter):
+        ax.scatter(
+            X[clutter, 0],
+            X[clutter, 1],
+            c=clutter_color,
+            marker="x",
+            s=22,
+            alpha=0.75,
+            linewidths=0.8,
+        )
+
+    ax.set_title(title)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_aspect("equal", adjustable="box")
+
+
+def plot_input_data(config: ExperimentConfig) -> None:
+    """Save a clean-versus-clutter input data figure."""
+
+    os.makedirs(config.output_dir, exist_ok=True)
+
+    X_clean, y_clean = make_half_moons(
+        n_per_moon=config.n_per_moon,
+        noise=0.00,
+        n_clutter=0,
+        seed=5,
+    )
+
+    X_clutter, y_clutter = make_half_moons(
+        n_per_moon=config.n_per_moon,
+        noise=0.08,
+        n_clutter=100,
+        seed=5,
+    )
+
+    fig, axes = plt.subplots(1, 2, figsize=(8.4, 3.8))
+
+    scatter_true_labels(
+        axes[0],
+        X_clean,
+        y_clean,
+        title="(A) Clean half-moons",
+    )
+
+    scatter_true_labels(
+        axes[1],
+        X_clutter,
+        y_clutter,
+        title="(B) Half-moons with scatter clutter",
+    )
+
+    axes[1].legend(loc="upper right", fontsize=8, frameon=True)
+
+    fig.tight_layout()
+
+    pdf_path = os.path.join(config.output_dir, "half_moons_clean_vs_clutter.pdf")
+    png_path = os.path.join(config.output_dir, "half_moons_clean_vs_clutter.png")
+
+    fig.savefig(pdf_path, bbox_inches="tight")
+    fig.savefig(png_path, dpi=300, bbox_inches="tight")
+    plt.show()
+
+    print(f"Saved {pdf_path}")
+    print(f"Saved {png_path}")
+
+
+def plot_method_panel(config: ExperimentConfig, seed: int = 1) -> None:
+    """Save a 2x2 panel comparing density removal and density gating."""
+
+    os.makedirs(config.output_dir, exist_ok=True)
+
+    X, y = make_half_moons(
+        n_per_moon=config.n_per_moon,
+        noise=0.08,
+        n_clutter=100,
+        seed=seed,
+    )
+
+    K, _ = gaussian_knn_kernel(X, k=config.k_nn)
+
+    methods = [
+        ("Diffusion map, $\\alpha=0$", diffusion_map_clustering(K, alpha=0.0, seed=seed)[0]),
+        ("Diffusion map, $\\alpha=1$", diffusion_map_clustering(K, alpha=1.0, seed=seed)[0]),
+        ("Gamma-Dirichlet, $\\gamma=0$", gamma_dirichlet_clustering(K, gamma=0.0, seed=seed)[0]),
+        ("Gamma-Dirichlet, $\\gamma=1.5$", gamma_dirichlet_clustering(K, gamma=1.5, seed=seed)[0]),
+    ]
+
+    fig, axes = plt.subplots(2, 2, figsize=(8.6, 7.4))
+
+    for ax, (title, labels) in zip(axes.ravel(), methods):
+        ari = adjusted_rand_nonclutter(y, labels)
+        scatter_cluster_labels(
+            ax,
+            X,
+            y,
+            labels,
+            title=f"{title}\nARI={ari:.3f}",
+        )
+
+    fig.suptitle(
+        "Half-moons with scatter clutter: density removal versus density gating",
+        y=0.98,
+    )
+
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+
+    pdf_path = os.path.join(config.output_dir, "half_moons_dm_vs_gamma_2x2.pdf")
+    png_path = os.path.join(config.output_dir, "half_moons_dm_vs_gamma_2x2.png")
+
+    fig.savefig(pdf_path, bbox_inches="tight")
+    fig.savefig(png_path, dpi=300, bbox_inches="tight")
+    plt.show()
+
+    print(f"Saved {pdf_path}")
+    print(f"Saved {png_path}")
+
+
+def plot_sweeps(summary: pd.DataFrame, config: ExperimentConfig) -> None:
+    """Save ARI curves over alpha and gamma."""
+
+    os.makedirs(config.output_dir, exist_ok=True)
+
+    fig, axes = plt.subplots(1, 2, figsize=(10.5, 4.2), sharey=True)
+
+    dm = summary[summary["method"] == "Diffusion map"]
+    gd = summary[summary["method"] == "Gamma-Dirichlet"]
+
+    for setting in config.settings:
+        sub = dm[dm["setting"] == setting].sort_values("parameter")
+        axes[0].errorbar(
+            sub["parameter"],
+            sub["mean_ari"],
+            yerr=sub["sd_ari"],
+            marker="o",
+            capsize=3,
+            label=setting,
+        )
+
+        sub = gd[gd["setting"] == setting].sort_values("parameter")
+        axes[1].errorbar(
+            sub["parameter"],
+            sub["mean_ari"],
+            yerr=sub["sd_ari"],
+            marker="s",
+            capsize=3,
+            label=setting,
+        )
+
+    axes[0].set_title("Diffusion map")
+    axes[0].set_xlabel(r"$\alpha$  (density removed)")
+    axes[0].set_ylabel("Adjusted Rand index")
+
+    axes[1].set_title("Gamma-Dirichlet")
+    axes[1].set_xlabel(r"$\gamma$  (density gated)")
+
+    for ax in axes:
+        ax.set_ylim(-0.05, 1.05)
+        ax.grid(alpha=0.3)
+        ax.legend(fontsize=8, frameon=True)
+
+    fig.tight_layout()
+
+    pdf_path = os.path.join(config.output_dir, "half_moons_dm_vs_gamma_sweeps.pdf")
+    png_path = os.path.join(config.output_dir, "half_moons_dm_vs_gamma_sweeps.png")
+
+    fig.savefig(pdf_path, bbox_inches="tight")
+    fig.savefig(png_path, dpi=300, bbox_inches="tight")
+    plt.show()
+
+    print(f"Saved {pdf_path}")
+    print(f"Saved {png_path}")
+
+# %%
+# ============================================================
+# Main routine
+# ============================================================
+
+def main() -> pd.DataFrame:
+    """Run the full Section 5.1 experiment and save all outputs."""
+
+    config = ExperimentConfig()
+    os.makedirs(config.output_dir, exist_ok=True)
+
+    # These figures are quick and useful for checking the data geometry.
+    plot_input_data(config)
+    plot_method_panel(config, seed=1)
+
+    # This part runs the replicate sweep used for the manuscript table.
+    summary = run_experiment(config)
+
+    print("\nGamma-Dirichlet table:")
+    print(wide_table(summary, "Gamma-Dirichlet", "gamma").to_string(index=False))
+
+    print("\nDiffusion-map table:")
+    print(wide_table(summary, "Diffusion map", "alpha").to_string(index=False))
+
+    save_summary_tables(summary, config)
+    plot_sweeps(summary, config)
+
+    return summary
+
+
+if __name__ == "__main__":
+    summary = main()
