@@ -1,9 +1,7 @@
 ## Repository structure
 
-```text
 .
-├── half_moons_section51.ipynb
-├── half_moons_section51.py
+├── half_moons_recalculation_shared_readout.ipynb
 ├── swiss_roll_section52.ipynb
 ├── swiss_roll_section52.py
 ├── figure_snippets.tex
