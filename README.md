@@ -23,7 +23,12 @@ The experiment uses 300 half-moon observations with Gaussian coordinate noise
 of standard deviation 0.18 and no additional background clutter.  A Gaussian
 15-nearest-neighbour graph is constructed, and the escort walk is evaluated at
 
-$$\gamma = 0,\;3,\;5.$$
+
+```math
+c_{ij}^{(\gamma)}
+=
+q_i^{\gamma/2} q_j^{\gamma/2} K_{ij}.
+```
 
 For the paper convention, the gamma-gated conductance is
 
