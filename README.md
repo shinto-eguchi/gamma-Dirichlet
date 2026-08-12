@@ -25,9 +25,7 @@ of standard deviation 0.18 and no additional background clutter.  A Gaussian
 
 
 ```math
-c_{ij}^{(\gamma)}
-=
-q_i^{\gamma/2} q_j^{\gamma/2} K_{ij}.
+\gamma=0,3,5
 ```
 
 For the paper convention, the gamma-gated conductance is
