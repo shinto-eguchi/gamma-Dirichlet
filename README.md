@@ -30,7 +30,9 @@ of standard deviation 0.18 and no additional background clutter.  A Gaussian
 
 For the paper convention, the gamma-gated conductance is
 
-$$c_{ij}^{(\gamma)}=q_i^{\gamma/2} q_j^{\gamma/2} K_{ij}.$$
+```math
+c_{ij}^{(\gamma)}=q_i^{\gamma/2} q_j^{\gamma/2} K_{ij}.
+```
 
 The Ollivier--Ricci curvature is computed from the one-half lazy escort walk
 using a fixed ground metric.  As gamma increases, within-moon edges become
