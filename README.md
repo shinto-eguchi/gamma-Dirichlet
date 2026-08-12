@@ -46,4 +46,9 @@ For the realization used in the manuscript, the median curvatures are:
 | 3 | 0.172 | -0.028 | 0.200 |
 | 5 | 0.193 | -0.041 | 0.233 |
 
+Reproducibility outputs:
+
+- [Curvature summary CSV](results/half_moons_ollivier_summary_noise018.csv)
+- [Edgewise curvature figure](results/half_moons_ollivier_edges_jitter_noise018.pdf)
+
 The standalone script uses 7 parallel workers by default.
